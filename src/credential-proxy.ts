@@ -23,6 +23,14 @@ export interface ProxyConfig {
   authMode: AuthMode;
 }
 
+function buildUpstreamPath(upstreamUrl: URL, requestUrl: string | undefined): string {
+  const basePath = upstreamUrl.pathname.replace(/\/$/, '');
+  const incomingPath = requestUrl || '/';
+  if (!basePath) return incomingPath;
+  if (incomingPath === '/') return basePath || '/';
+  return `${basePath}${incomingPath.startsWith('/') ? incomingPath : `/${incomingPath}`}`;
+}
+
 export function startCredentialProxy(
   port: number,
   host = '127.0.0.1',
@@ -98,7 +106,7 @@ export function startCredentialProxy(
           {
             hostname: upstreamUrl.hostname,
             port: upstreamUrl.port || (isHttps ? 443 : 80),
-            path: req.url,
+            path: buildUpstreamPath(upstreamUrl, req.url),
             method: req.method,
             headers,
           } as RequestOptions,

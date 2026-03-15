@@ -49,12 +49,14 @@ describe('credential-proxy', () => {
   let proxyPort: number;
   let upstreamPort: number;
   let lastUpstreamHeaders: http.IncomingHttpHeaders;
+  let lastUpstreamUrl: string | undefined;
 
   beforeEach(async () => {
     lastUpstreamHeaders = {};
 
     upstreamServer = http.createServer((req, res) => {
       lastUpstreamHeaders = { ...req.headers };
+      lastUpstreamUrl = req.url;
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));
     });
@@ -164,6 +166,30 @@ describe('credential-proxy', () => {
 
     expect(lastUpstreamHeaders['authorization']).toBe('Bearer or-real-token');
     expect(lastUpstreamHeaders['x-api-key']).toBeUndefined();
+  });
+
+  it('preserves a base path from ANTHROPIC_BASE_URL', async () => {
+    Object.assign(mockEnv, {
+      ANTHROPIC_AUTH_TOKEN: 'or-real-token',
+      ANTHROPIC_BASE_URL: `http://127.0.0.1:${upstreamPort}/api`,
+    });
+    proxyServer = await startCredentialProxy(0);
+    proxyPort = (proxyServer.address() as AddressInfo).port;
+
+    await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/v1/messages?beta=true',
+        headers: {
+          'content-type': 'application/json',
+          authorization: 'Bearer placeholder',
+        },
+      },
+      '{}',
+    );
+
+    expect(lastUpstreamUrl).toBe('/api/v1/messages?beta=true');
   });
 
   it('strips hop-by-hop headers', async () => {
