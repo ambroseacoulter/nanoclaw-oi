@@ -19,7 +19,8 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
-import { RegisteredGroup, ScheduledTask } from './types.js';
+import { resolveAgentPolicy } from './policy.js';
+import { Agent, RegisteredGroup, ScheduledTask } from './types.js';
 
 /**
  * Compute the next run time for a recurring task, anchored to the
@@ -64,13 +65,15 @@ export function computeNextRun(task: ScheduledTask): string | null {
 
 export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
+  agents?: () => Record<string, Agent>;
   getSessions: () => Record<string, string>;
   queue: GroupQueue;
   onProcess: (
-    groupJid: string,
+    ownerId: string,
     proc: ChildProcess,
     containerName: string,
     groupFolder: string,
+    deliveryChatJid?: string,
   ) => void;
   sendMessage: (jid: string, text: string) => Promise<void>;
 }
@@ -104,19 +107,36 @@ async function runTask(
   fs.mkdirSync(groupDir, { recursive: true });
 
   logger.info(
-    { taskId: task.id, group: task.group_folder },
+    { taskId: task.id, group: task.agent_id || task.group_folder },
     'Running scheduled task',
   );
 
-  const groups = deps.registeredGroups();
-  const group = Object.values(groups).find(
-    (g) => g.folder === task.group_folder,
-  );
+  const agentId = task.agent_id || task.group_folder;
+  const agent =
+    deps.agents?.()[agentId] ||
+    (() => {
+      const group = Object.values(deps.registeredGroups()).find(
+        (entry) => entry.folder === task.group_folder,
+      );
+      if (!group) return undefined;
+      return {
+        id: group.folder,
+        slug: group.folder,
+        displayName: group.name,
+        workspaceFolder: group.folder,
+        profile: group.isMain ? 'admin' : 'adult',
+        policyOverrides: undefined,
+        containerConfig: group.containerConfig,
+        isAdmin: group.isMain === true,
+        createdAt: group.added_at,
+        status: 'active' as const,
+      };
+    })();
 
-  if (!group) {
+  if (!agent) {
     logger.error(
-      { taskId: task.id, groupFolder: task.group_folder },
-      'Group not found for task',
+      { taskId: task.id, agentId },
+      'Agent not found for task',
     );
     logTaskRun({
       task_id: task.id,
@@ -124,20 +144,20 @@ async function runTask(
       duration_ms: Date.now() - startTime,
       status: 'error',
       result: null,
-      error: `Group not found: ${task.group_folder}`,
+      error: `Agent not found: ${agentId}`,
     });
     return;
   }
 
-  // Update tasks snapshot for container to read (filtered by group)
-  const isMain = group.isMain === true;
+  // Update tasks snapshot for container to read (filtered by agent)
+  const isMain = agent.isAdmin === true;
   const tasks = getAllTasks();
   writeTasksSnapshot(
-    task.group_folder,
+    agentId,
     isMain,
     tasks.map((t) => ({
       id: t.id,
-      groupFolder: t.group_folder,
+      groupFolder: t.agent_id || t.group_folder,
       prompt: t.prompt,
       schedule_type: t.schedule_type,
       schedule_value: t.schedule_value,
@@ -152,7 +172,8 @@ async function runTask(
   // For group context mode, use the group's current session
   const sessions = deps.getSessions();
   const sessionId =
-    task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
+    task.context_mode === 'group' ? sessions[agentId] : undefined;
+  const policy = resolveAgentPolicy(agent);
 
   // After the task produces a result, close the container promptly.
   // Tasks are single-turn — no need to wait IDLE_TIMEOUT (30 min) for the
@@ -164,33 +185,45 @@ async function runTask(
     if (closeTimer) return; // already scheduled
     closeTimer = setTimeout(() => {
       logger.debug({ taskId: task.id }, 'Closing task container after result');
-      deps.queue.closeStdin(task.chat_jid);
+      deps.queue.closeStdin(agentId);
     }, TASK_CLOSE_DELAY_MS);
   };
 
   try {
     const output = await runContainerAgent(
-      group,
+      agent,
       {
         prompt: task.prompt,
         sessionId,
         groupFolder: task.group_folder,
-        chatJid: task.chat_jid,
-        isMain,
+        agentId,
+        deliveryChatJid: task.delivery_chat_jid || task.chat_jid,
+        isAdmin: isMain,
+        allowedTools: policy.allowedTools,
+        disallowedTools: policy.disallowedTools,
         isScheduledTask: true,
         assistantName: ASSISTANT_NAME,
       },
       (proc, containerName) =>
-        deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
+        deps.onProcess(
+          agentId,
+          proc,
+          containerName,
+          task.group_folder,
+          task.delivery_chat_jid || task.chat_jid,
+        ),
       async (streamedOutput: ContainerOutput) => {
         if (streamedOutput.result) {
           result = streamedOutput.result;
           // Forward result to user (sendMessage handles formatting)
-          await deps.sendMessage(task.chat_jid, streamedOutput.result);
+          await deps.sendMessage(
+            task.delivery_chat_jid || task.chat_jid,
+            streamedOutput.result,
+          );
           scheduleClose();
         }
         if (streamedOutput.status === 'success') {
-          deps.queue.notifyIdle(task.chat_jid);
+          deps.queue.notifyIdle(agentId);
           scheduleClose(); // Close promptly even when result is null (e.g. IPC-only tasks)
         }
         if (streamedOutput.status === 'error') {
@@ -262,7 +295,10 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           continue;
         }
 
-        deps.queue.enqueueTask(currentTask.chat_jid, currentTask.id, () =>
+        deps.queue.enqueueTask(
+          currentTask.agent_id || currentTask.group_folder,
+          currentTask.id,
+          () =>
           runTask(currentTask, deps),
         );
       }

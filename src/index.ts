@@ -27,15 +27,23 @@ import {
   PROXY_BIND_HOST,
 } from './container-runtime.js';
 import {
+  getAgent,
+  getAllAgents,
   getAllChats,
+  getAllIdentityBindings,
   getAllRegisteredGroups,
   getAllSessions,
   getAllTasks,
+  getIdentityBinding,
+  getIdentityBindingsForAgent,
+  getMessagesSinceChats,
   getMessagesSince,
   getNewMessages,
   getRegisteredGroup,
   getRouterState,
   initDatabase,
+  setAgent,
+  setIdentityBinding,
   setRegisteredGroup,
   setRouterState,
   setSession,
@@ -45,6 +53,7 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
+import { canRemoteControl, resolveAgentPolicy } from './policy.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
   restoreRemoteControl,
@@ -58,7 +67,7 @@ import {
   shouldDropMessage,
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { Channel, NewMessage, RegisteredGroup } from './types.js';
+import { Agent, Channel, IdentityBinding, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
@@ -66,12 +75,30 @@ export { escapeXml, formatMessages } from './router.js';
 
 let lastTimestamp = '';
 let sessions: Record<string, string> = {};
+let agents: Record<string, Agent> = {};
+let identityBindings: Record<string, IdentityBinding> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
+
+function normalizeAgentTimestamps(): void {
+  const normalized: Record<string, string> = {};
+  for (const [key, value] of Object.entries(lastAgentTimestamp)) {
+    const binding = identityBindings[key];
+    const agentId = binding?.agentId || key;
+    if (!normalized[agentId] || value > normalized[agentId]) {
+      normalized[agentId] = value;
+    }
+  }
+  lastAgentTimestamp = normalized;
+}
+
+function hasPrivateBindings(): boolean {
+  return Object.values(identityBindings).some((binding) => binding.kind === 'private');
+}
 
 function loadState(): void {
   lastTimestamp = getRouterState('last_timestamp') || '';
@@ -83,9 +110,16 @@ function loadState(): void {
     lastAgentTimestamp = {};
   }
   sessions = getAllSessions();
+  agents = getAllAgents();
+  identityBindings = getAllIdentityBindings();
   registeredGroups = getAllRegisteredGroups();
+  normalizeAgentTimestamps();
   logger.info(
-    { groupCount: Object.keys(registeredGroups).length },
+    {
+      groupCount: Object.keys(registeredGroups).length,
+      agentCount: Object.keys(agents).length,
+      bindingCount: Object.keys(identityBindings).length,
+    },
     'State loaded',
   );
 }
@@ -109,6 +143,32 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
 
   registeredGroups[jid] = group;
   setRegisteredGroup(jid, group);
+  const chat = getAllChats().find((entry) => entry.jid === jid);
+  const agent: Agent = {
+    id: group.folder,
+    slug: group.folder,
+    displayName: group.name,
+    workspaceFolder: group.folder,
+    profile: group.isMain ? 'admin' : 'adult',
+    containerConfig: group.containerConfig,
+    isAdmin: group.isMain === true,
+    createdAt: group.added_at,
+    status: 'active',
+  };
+  agents[agent.id] = agent;
+  setAgent(agent);
+  const binding: IdentityBinding = {
+    chatJid: jid,
+    channel: chat?.channel || 'unknown',
+    agentId: agent.id,
+    kind: chat?.is_group ? 'group' : 'private',
+    createdAt: group.added_at,
+    enabled: true,
+    requiresTrigger: group.requiresTrigger,
+    isAdmin: group.isMain === true,
+  };
+  identityBindings[jid] = binding;
+  setIdentityBinding(binding);
 
   // Create group folder
   fs.mkdirSync(path.join(groupDir, 'logs'), { recursive: true });
@@ -119,21 +179,34 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
   );
 }
 
+function getAgentForChat(chatJid: string): Agent | undefined {
+  const binding = identityBindings[chatJid];
+  if (!binding || !binding.enabled) return undefined;
+  return agents[binding.agentId];
+}
+
 /**
- * Get available groups list for the agent.
- * Returns groups ordered by most recent activity.
+ * Get available chats list for admin provisioning.
+ * Returns chats ordered by most recent activity.
  */
 export function getAvailableGroups(): import('./container-runner.js').AvailableGroup[] {
   const chats = getAllChats();
-  const registeredJids = new Set(Object.keys(registeredGroups));
+  const boundJids = new Set([
+    ...Object.keys(identityBindings),
+    ...Object.keys(registeredGroups),
+  ]);
+  const includePrivateChats = hasPrivateBindings();
 
   return chats
-    .filter((c) => c.jid !== '__group_sync__' && c.is_group)
+    .filter(
+      (c) =>
+        c.jid !== '__group_sync__' && (includePrivateChats || c.is_group),
+    )
     .map((c) => ({
       jid: c.jid,
       name: c.name,
       lastActivity: c.last_message_time,
-      isRegistered: registeredJids.has(c.jid),
+      isRegistered: boundJids.has(c.jid),
     }));
 }
 
@@ -145,118 +218,114 @@ export function _setRegisteredGroups(
 }
 
 /**
- * Process all pending messages for a group.
- * Called by the GroupQueue when it's this group's turn.
+ * Process all pending messages for an agent.
+ * Called by the queue when it's this agent's turn.
  */
-async function processGroupMessages(chatJid: string): Promise<boolean> {
-  const group = registeredGroups[chatJid];
-  if (!group) return true;
+async function processAgentMessages(agentId: string): Promise<boolean> {
+  const agent = agents[agentId];
+  if (!agent || agent.status !== 'active') return true;
 
-  const channel = findChannel(channels, chatJid);
-  if (!channel) {
-    logger.warn({ chatJid }, 'No channel owns JID, skipping messages');
-    return true;
-  }
+  const bindings = getIdentityBindingsForAgent(agentId).filter((binding) => binding.enabled);
+  if (bindings.length === 0) return true;
 
-  const isMainGroup = group.isMain === true;
-
-  const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
-  const missedMessages = getMessagesSince(
-    chatJid,
+  const chatJids = bindings.map((binding) => binding.chatJid);
+  const sinceTimestamp = lastAgentTimestamp[agentId] || '';
+  const pendingMessages = getMessagesSinceChats(
+    chatJids,
     sinceTimestamp,
     ASSISTANT_NAME,
   );
+  if (pendingMessages.length === 0) return true;
 
-  if (missedMessages.length === 0) return true;
+  const deliveryChatJid =
+    pendingMessages[pendingMessages.length - 1]?.chat_jid || bindings[0].chatJid;
+  const deliveryBinding = identityBindings[deliveryChatJid];
+  if (!deliveryBinding || !deliveryBinding.enabled) return true;
 
-  // For non-main groups, check if trigger is required and present
-  if (!isMainGroup && group.requiresTrigger !== false) {
+  const channel = findChannel(channels, deliveryChatJid);
+  if (!channel) {
+    logger.warn({ chatJid: deliveryChatJid }, 'No channel owns JID, skipping messages');
+    return true;
+  }
+
+  if (deliveryBinding.kind === 'group' && deliveryBinding.requiresTrigger !== false) {
     const allowlistCfg = loadSenderAllowlist();
-    const hasTrigger = missedMessages.some(
+    const hasTrigger = pendingMessages.some(
       (m) =>
         TRIGGER_PATTERN.test(m.content.trim()) &&
-        (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
+        (m.is_from_me || isTriggerAllowed(m.chat_jid, m.sender, allowlistCfg)),
     );
     if (!hasTrigger) return true;
   }
 
-  const prompt = formatMessages(missedMessages, TIMEZONE);
-
-  // Advance cursor so the piping path in startMessageLoop won't re-fetch
-  // these messages. Save the old cursor so we can roll back on error.
-  const previousCursor = lastAgentTimestamp[chatJid] || '';
-  lastAgentTimestamp[chatJid] =
-    missedMessages[missedMessages.length - 1].timestamp;
+  const prompt = formatMessages(pendingMessages, TIMEZONE);
+  const previousCursor = lastAgentTimestamp[agentId] || '';
+  lastAgentTimestamp[agentId] =
+    pendingMessages[pendingMessages.length - 1].timestamp;
   saveState();
 
   logger.info(
-    { group: group.name, messageCount: missedMessages.length },
+    { agent: agent.displayName, agentId, messageCount: pendingMessages.length },
     'Processing messages',
   );
 
-  // Track idle timer for closing stdin when agent is idle
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
-
   const resetIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
-      logger.debug(
-        { group: group.name },
-        'Idle timeout, closing container stdin',
-      );
-      queue.closeStdin(chatJid);
+      logger.debug({ agent: agent.displayName }, 'Idle timeout, closing container stdin');
+      queue.closeStdin(agentId);
     }, IDLE_TIMEOUT);
   };
 
-  await channel.setTyping?.(chatJid, true);
+  await channel.setTyping?.(deliveryChatJid, true);
   let hadError = false;
   let outputSentToUser = false;
 
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
-    // Streaming output callback — called for each agent result
-    if (result.result) {
-      const raw =
-        typeof result.result === 'string'
-          ? result.result
-          : JSON.stringify(result.result);
-      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
-      if (text) {
-        await channel.sendMessage(chatJid, text);
-        outputSentToUser = true;
+  const output = await runAgent(
+    agent,
+    prompt,
+    deliveryChatJid,
+    async (result) => {
+      if (result.result) {
+        const raw =
+          typeof result.result === 'string'
+            ? result.result
+            : JSON.stringify(result.result);
+        const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+        logger.info({ agent: agent.displayName }, `Agent output: ${raw.slice(0, 200)}`);
+        if (text) {
+          await channel.sendMessage(deliveryChatJid, text);
+          outputSentToUser = true;
+        }
+        resetIdleTimer();
       }
-      // Only reset idle timer on actual results, not session-update markers (result: null)
-      resetIdleTimer();
-    }
 
-    if (result.status === 'success') {
-      queue.notifyIdle(chatJid);
-    }
+      if (result.status === 'success') {
+        queue.notifyIdle(agentId);
+      }
 
-    if (result.status === 'error') {
-      hadError = true;
-    }
-  });
+      if (result.status === 'error') {
+        hadError = true;
+      }
+    },
+  );
 
-  await channel.setTyping?.(chatJid, false);
+  await channel.setTyping?.(deliveryChatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
-    // If we already sent output to the user, don't roll back the cursor —
-    // the user got their response and re-processing would send duplicates.
     if (outputSentToUser) {
       logger.warn(
-        { group: group.name },
+        { agent: agent.displayName },
         'Agent error after output was sent, skipping cursor rollback to prevent duplicates',
       );
       return true;
     }
-    // Roll back cursor so retries can re-process these messages
-    lastAgentTimestamp[chatJid] = previousCursor;
+    lastAgentTimestamp[agentId] = previousCursor;
     saveState();
     logger.warn(
-      { group: group.name },
+      { agent: agent.displayName },
       'Agent error, rolled back message cursor for retry',
     );
     return false;
@@ -266,22 +335,22 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 }
 
 async function runAgent(
-  group: RegisteredGroup,
+  agent: Agent,
   prompt: string,
-  chatJid: string,
+  deliveryChatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
-  const isMain = group.isMain === true;
-  const sessionId = sessions[group.folder];
+  const policy = resolveAgentPolicy(agent);
+  const sessionId = sessions[agent.id];
 
-  // Update tasks snapshot for container to read (filtered by group)
+  // Update tasks snapshot for container to read (filtered by agent)
   const tasks = getAllTasks();
   writeTasksSnapshot(
-    group.folder,
-    isMain,
+    agent.id,
+    agent.isAdmin === true,
     tasks.map((t) => ({
       id: t.id,
-      groupFolder: t.group_folder,
+      groupFolder: t.agent_id || t.group_folder,
       prompt: t.prompt,
       schedule_type: t.schedule_type,
       schedule_value: t.schedule_value,
@@ -293,18 +362,18 @@ async function runAgent(
   // Update available groups snapshot (main group only can see all groups)
   const availableGroups = getAvailableGroups();
   writeGroupsSnapshot(
-    group.folder,
-    isMain,
+    agent.id,
+    agent.isAdmin === true,
     availableGroups,
-    new Set(Object.keys(registeredGroups)),
+    new Set(Object.keys(identityBindings)),
   );
 
   // Wrap onOutput to track session ID from streamed results
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
         if (output.newSessionId) {
-          sessions[group.folder] = output.newSessionId;
-          setSession(group.folder, output.newSessionId);
+          sessions[agent.id] = output.newSessionId;
+          setSession(agent.id, output.newSessionId);
         }
         await onOutput(output);
       }
@@ -312,28 +381,37 @@ async function runAgent(
 
   try {
     const output = await runContainerAgent(
-      group,
+      agent,
       {
         prompt,
         sessionId,
-        groupFolder: group.folder,
-        chatJid,
-        isMain,
+        groupFolder: agent.workspaceFolder,
+        agentId: agent.id,
+        deliveryChatJid,
+        isAdmin: agent.isAdmin === true,
+        allowedTools: policy.allowedTools,
+        disallowedTools: policy.disallowedTools,
         assistantName: ASSISTANT_NAME,
       },
       (proc, containerName) =>
-        queue.registerProcess(chatJid, proc, containerName, group.folder),
+        queue.registerProcess(
+          agent.id,
+          proc,
+          containerName,
+          agent.workspaceFolder,
+          deliveryChatJid,
+        ),
       wrappedOnOutput,
     );
 
     if (output.newSessionId) {
-      sessions[group.folder] = output.newSessionId;
-      setSession(group.folder, output.newSessionId);
+      sessions[agent.id] = output.newSessionId;
+      setSession(agent.id, output.newSessionId);
     }
 
     if (output.status === 'error') {
       logger.error(
-        { group: group.name, error: output.error },
+        { group: agent.displayName, error: output.error },
         'Container agent error',
       );
       return 'error';
@@ -341,7 +419,7 @@ async function runAgent(
 
     return 'success';
   } catch (err) {
-    logger.error({ group: group.name, err }, 'Agent error');
+    logger.error({ group: agent.displayName, err }, 'Agent error');
     return 'error';
   }
 }
@@ -357,7 +435,9 @@ async function startMessageLoop(): Promise<void> {
 
   while (true) {
     try {
-      const jids = Object.keys(registeredGroups);
+      const jids = Object.values(identityBindings)
+        .filter((binding) => binding.enabled)
+        .map((binding) => binding.chatJid);
       const { messages, newTimestamp } = getNewMessages(
         jids,
         lastTimestamp,
@@ -371,72 +451,96 @@ async function startMessageLoop(): Promise<void> {
         lastTimestamp = newTimestamp;
         saveState();
 
-        // Deduplicate by group
-        const messagesByGroup = new Map<string, NewMessage[]>();
+        // Deduplicate by agent
+        const messagesByAgent = new Map<string, NewMessage[]>();
         for (const msg of messages) {
-          const existing = messagesByGroup.get(msg.chat_jid);
+          const binding = identityBindings[msg.chat_jid];
+          if (!binding || !binding.enabled) continue;
+          const existing = messagesByAgent.get(binding.agentId);
           if (existing) {
             existing.push(msg);
           } else {
-            messagesByGroup.set(msg.chat_jid, [msg]);
+            messagesByAgent.set(binding.agentId, [msg]);
           }
         }
 
-        for (const [chatJid, groupMessages] of messagesByGroup) {
-          const group = registeredGroups[chatJid];
-          if (!group) continue;
+        for (const [agentId, agentMessages] of messagesByAgent) {
+          const agent = agents[agentId];
+          if (!agent || agent.status !== 'active') continue;
 
-          const channel = findChannel(channels, chatJid);
+          const deliveryChatJid =
+            agentMessages[agentMessages.length - 1]?.chat_jid;
+          if (!deliveryChatJid) continue;
+          const binding = identityBindings[deliveryChatJid];
+          if (!binding || !binding.enabled) continue;
+
+          const channel = findChannel(channels, deliveryChatJid);
           if (!channel) {
-            logger.warn({ chatJid }, 'No channel owns JID, skipping messages');
+            logger.warn(
+              { chatJid: deliveryChatJid },
+              'No channel owns JID, skipping messages',
+            );
             continue;
           }
 
-          const isMainGroup = group.isMain === true;
-          const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
+          const needsTrigger =
+            binding.kind === 'group' && binding.requiresTrigger !== false;
 
-          // For non-main groups, only act on trigger messages.
+          // Group bindings keep the legacy trigger behavior.
           // Non-trigger messages accumulate in DB and get pulled as
           // context when a trigger eventually arrives.
           if (needsTrigger) {
             const allowlistCfg = loadSenderAllowlist();
-            const hasTrigger = groupMessages.some(
+            const hasTrigger = agentMessages.some(
               (m) =>
                 TRIGGER_PATTERN.test(m.content.trim()) &&
                 (m.is_from_me ||
-                  isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
+                  isTriggerAllowed(m.chat_jid, m.sender, allowlistCfg)),
             );
             if (!hasTrigger) continue;
           }
 
-          // Pull all messages since lastAgentTimestamp so non-trigger
+          const bindingChatJids = getIdentityBindingsForAgent(agentId)
+            .filter((item) => item.enabled)
+            .map((item) => item.chatJid);
+
+          // Pull all messages since the agent cursor so linked identities
+          // share one session and one pending message window.
           // context that accumulated between triggers is included.
-          const allPending = getMessagesSince(
-            chatJid,
-            lastAgentTimestamp[chatJid] || '',
+          const allPending = getMessagesSinceChats(
+            bindingChatJids,
+            lastAgentTimestamp[agentId] || '',
             ASSISTANT_NAME,
           );
           const messagesToSend =
-            allPending.length > 0 ? allPending : groupMessages;
+            allPending.length > 0 ? allPending : agentMessages;
           const formatted = formatMessages(messagesToSend, TIMEZONE);
 
-          if (queue.sendMessage(chatJid, formatted)) {
+          if (queue.sendMessage(agentId, formatted, deliveryChatJid)) {
             logger.debug(
-              { chatJid, count: messagesToSend.length },
+              { agentId, chatJid: deliveryChatJid, count: messagesToSend.length },
               'Piped messages to active container',
             );
-            lastAgentTimestamp[chatJid] =
+            lastAgentTimestamp[agentId] =
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
             // Show typing indicator while the container processes the piped message
             channel
-              .setTyping?.(chatJid, true)
+              .setTyping?.(deliveryChatJid, true)
               ?.catch((err) =>
-                logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
+                logger.warn(
+                  { chatJid: deliveryChatJid, err },
+                  'Failed to set typing indicator',
+                ),
               );
           } else {
-            // No active container — enqueue for a new one
-            queue.enqueueMessageCheck(chatJid);
+            if (
+              queue.isActive(agentId) &&
+              queue.getActiveDeliveryChatJid(agentId) !== deliveryChatJid
+            ) {
+              queue.closeStdin(agentId);
+            }
+            queue.enqueueMessageCheck(agentId);
           }
         }
       }
@@ -452,15 +556,18 @@ async function startMessageLoop(): Promise<void> {
  * Handles crash between advancing lastTimestamp and processing messages.
  */
 function recoverPendingMessages(): void {
-  for (const [chatJid, group] of Object.entries(registeredGroups)) {
-    const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
-    const pending = getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME);
+  for (const [agentId, agent] of Object.entries(agents)) {
+    const chatJids = getIdentityBindingsForAgent(agentId)
+      .filter((binding) => binding.enabled)
+      .map((binding) => binding.chatJid);
+    const sinceTimestamp = lastAgentTimestamp[agentId] || '';
+    const pending = getMessagesSinceChats(chatJids, sinceTimestamp, ASSISTANT_NAME);
     if (pending.length > 0) {
       logger.info(
-        { group: group.name, pendingCount: pending.length },
+        { group: agent.displayName, pendingCount: pending.length },
         'Recovery: found unprocessed messages',
       );
-      queue.enqueueMessageCheck(chatJid);
+      queue.enqueueMessageCheck(agentId);
     }
   }
 }
@@ -500,11 +607,11 @@ async function main(): Promise<void> {
     chatJid: string,
     msg: NewMessage,
   ): Promise<void> {
-    const group = registeredGroups[chatJid];
-    if (!group?.isMain) {
+    const agent = getAgentForChat(chatJid);
+    if (!agent || !canRemoteControl(agent)) {
       logger.warn(
         { chatJid, sender: msg.sender },
-        'Remote control rejected: not main group',
+        'Remote control rejected: policy denied',
       );
       return;
     }
@@ -521,9 +628,10 @@ async function main(): Promise<void> {
       if (result.ok) {
         await channel.sendMessage(chatJid, result.url);
       } else {
+        const error = result.error;
         await channel.sendMessage(
           chatJid,
-          `Remote Control failed: ${result.error}`,
+          `Remote Control failed: ${error}`,
         );
       }
     } else {
@@ -531,7 +639,8 @@ async function main(): Promise<void> {
       if (result.ok) {
         await channel.sendMessage(chatJid, 'Remote Control session ended.');
       } else {
-        await channel.sendMessage(chatJid, result.error);
+        const error = result.error;
+        await channel.sendMessage(chatJid, error);
       }
     }
   }
@@ -549,7 +658,7 @@ async function main(): Promise<void> {
       }
 
       // Sender allowlist drop mode: discard messages from denied senders before storing
-      if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
+      if (!msg.is_from_me && !msg.is_bot_message && identityBindings[chatJid]) {
         const cfg = loadSenderAllowlist();
         if (
           shouldDropMessage(chatJid, cfg) &&
@@ -600,10 +709,17 @@ async function main(): Promise<void> {
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
     registeredGroups: () => registeredGroups,
+    agents: () => agents,
     getSessions: () => sessions,
     queue,
-    onProcess: (groupJid, proc, containerName, groupFolder) =>
-      queue.registerProcess(groupJid, proc, containerName, groupFolder),
+    onProcess: (groupJid, proc, containerName, groupFolder, deliveryChatJid) =>
+      queue.registerProcess(
+        groupJid,
+        proc,
+        containerName,
+        groupFolder,
+        deliveryChatJid,
+      ),
     sendMessage: async (jid, rawText) => {
       const channel = findChannel(channels, jid);
       if (!channel) {
@@ -621,7 +737,20 @@ async function main(): Promise<void> {
       return channel.sendMessage(jid, text);
     },
     registeredGroups: () => registeredGroups,
+    agents: () => agents,
+    identityBindings: () => identityBindings,
     registerGroup,
+    setAgent: (agent) => {
+      agents[agent.id] = agent;
+      setAgent(agent);
+      fs.mkdirSync(path.join(resolveGroupFolderPath(agent.workspaceFolder), 'logs'), {
+        recursive: true,
+      });
+    },
+    setIdentityBinding: (binding) => {
+      identityBindings[binding.chatJid] = binding;
+      setIdentityBinding(binding);
+    },
     syncGroups: async (force: boolean) => {
       await Promise.all(
         channels
@@ -633,7 +762,7 @@ async function main(): Promise<void> {
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),
   });
-  queue.setProcessMessagesFn(processGroupMessages);
+  queue.setProcessMessagesFn(processAgentMessages);
   recoverPendingMessages();
   startMessageLoop().catch((err) => {
     logger.fatal({ err }, 'Message loop crashed unexpectedly');

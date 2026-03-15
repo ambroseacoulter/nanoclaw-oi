@@ -6,6 +6,9 @@ import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import {
+  Agent,
+  AgentPolicyOverrides,
+  IdentityBinding,
   NewMessage,
   RegisteredGroup,
   ScheduledTask,
@@ -82,6 +85,31 @@ function createSchema(database: Database.Database): void {
       container_config TEXT,
       requires_trigger INTEGER DEFAULT 1
     );
+    CREATE TABLE IF NOT EXISTS agents (
+      id TEXT PRIMARY KEY,
+      slug TEXT NOT NULL UNIQUE,
+      display_name TEXT NOT NULL,
+      workspace_folder TEXT NOT NULL UNIQUE,
+      profile TEXT NOT NULL,
+      policy_overrides TEXT,
+      container_config TEXT,
+      is_admin INTEGER DEFAULT 0,
+      created_at TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active'
+    );
+    CREATE TABLE IF NOT EXISTS identity_bindings (
+      chat_jid TEXT PRIMARY KEY,
+      channel TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'private',
+      created_at TEXT NOT NULL,
+      enabled INTEGER DEFAULT 1,
+      requires_trigger INTEGER,
+      is_admin INTEGER DEFAULT 0,
+      FOREIGN KEY (agent_id) REFERENCES agents(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_identity_bindings_agent
+      ON identity_bindings(agent_id);
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -139,6 +167,31 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* columns already exist */
   }
+
+  try {
+    database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN agent_id TEXT`);
+  } catch {
+    /* column already exists */
+  }
+
+  try {
+    database.exec(
+      `ALTER TABLE scheduled_tasks ADD COLUMN delivery_chat_jid TEXT`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
+  database.exec(`
+    UPDATE scheduled_tasks
+    SET agent_id = COALESCE(agent_id, group_folder)
+    WHERE agent_id IS NULL OR agent_id = ''
+  `);
+  database.exec(`
+    UPDATE scheduled_tasks
+    SET delivery_chat_jid = COALESCE(delivery_chat_jid, chat_jid)
+    WHERE delivery_chat_jid IS NULL OR delivery_chat_jid = ''
+  `);
 }
 
 export function initDatabase(): void {
@@ -150,12 +203,14 @@ export function initDatabase(): void {
 
   // Migrate from JSON files if they exist
   migrateJsonState();
+  migrateLegacyGroupsToAgents();
 }
 
 /** @internal - for tests only. Creates a fresh in-memory database. */
 export function _initTestDatabase(): void {
   db = new Database(':memory:');
   createSchema(db);
+  migrateLegacyGroupsToAgents();
 }
 
 /**
@@ -363,16 +418,45 @@ export function getMessagesSince(
     .all(chatJid, sinceTimestamp, `${botPrefix}:%`, limit) as NewMessage[];
 }
 
+export function getMessagesSinceChats(
+  chatJids: string[],
+  sinceTimestamp: string,
+  botPrefix: string,
+  limit: number = 200,
+): NewMessage[] {
+  if (chatJids.length === 0) return [];
+  const placeholders = chatJids.map(() => '?').join(',');
+  const sql = `
+    SELECT * FROM (
+      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me
+      FROM messages
+      WHERE chat_jid IN (${placeholders}) AND timestamp > ?
+        AND is_bot_message = 0 AND content NOT LIKE ?
+        AND content != '' AND content IS NOT NULL
+      ORDER BY timestamp DESC
+      LIMIT ?
+    ) ORDER BY timestamp
+  `;
+  return db
+    .prepare(sql)
+    .all(...chatJids, sinceTimestamp, `${botPrefix}:%`, limit) as NewMessage[];
+}
+
 export function createTask(
-  task: Omit<ScheduledTask, 'last_run' | 'last_result'>,
+  task: Omit<ScheduledTask, 'last_run' | 'last_result'> &
+    Partial<Pick<ScheduledTask, 'agent_id' | 'delivery_chat_jid'>>,
 ): void {
+  const agentId = task.agent_id || task.group_folder;
+  const deliveryChatJid = task.delivery_chat_jid || task.chat_jid;
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, agent_id, delivery_chat_jid, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
+    agentId,
+    deliveryChatJid,
     task.group_folder,
     task.chat_jid,
     task.prompt,
@@ -397,6 +481,14 @@ export function getTasksForGroup(groupFolder: string): ScheduledTask[] {
       'SELECT * FROM scheduled_tasks WHERE group_folder = ? ORDER BY created_at DESC',
     )
     .all(groupFolder) as ScheduledTask[];
+}
+
+export function getTasksForAgent(agentId: string): ScheduledTask[] {
+  return db
+    .prepare(
+      'SELECT * FROM scheduled_tasks WHERE agent_id = ? ORDER BY created_at DESC',
+    )
+    .all(agentId) as ScheduledTask[];
 }
 
 export function getAllTasks(): ScheduledTask[] {
@@ -537,6 +629,236 @@ export function getAllSessions(): Record<string, string> {
   return result;
 }
 
+function inferChannelFromJid(jid: string): string {
+  if (jid.startsWith('tg:')) return 'telegram';
+  if (jid.startsWith('dc:')) return 'discord';
+  if (jid.endsWith('@s.whatsapp.net') || jid.endsWith('@g.us')) {
+    return 'whatsapp';
+  }
+  return 'unknown';
+}
+
+function getChatMetadata(
+  chatJid: string,
+): { channel: string; is_group: number } | undefined {
+  return db
+    .prepare('SELECT channel, is_group FROM chats WHERE jid = ?')
+    .get(chatJid) as { channel: string; is_group: number } | undefined;
+}
+
+export function getAgent(id: string): Agent | undefined {
+  const row = db
+    .prepare('SELECT * FROM agents WHERE id = ?')
+    .get(id) as
+    | {
+        id: string;
+        slug: string;
+        display_name: string;
+        workspace_folder: string;
+        profile: Agent['profile'];
+        policy_overrides: string | null;
+        container_config: string | null;
+        is_admin: number;
+        created_at: string;
+        status: Agent['status'];
+      }
+    | undefined;
+  if (!row) return undefined;
+  return {
+    id: row.id,
+    slug: row.slug,
+    displayName: row.display_name,
+    workspaceFolder: row.workspace_folder,
+    profile: row.profile,
+    policyOverrides: row.policy_overrides
+      ? (JSON.parse(row.policy_overrides) as AgentPolicyOverrides)
+      : undefined,
+    containerConfig: row.container_config
+      ? JSON.parse(row.container_config)
+      : undefined,
+    isAdmin: row.is_admin === 1,
+    createdAt: row.created_at,
+    status: row.status,
+  };
+}
+
+export function getAllAgents(): Record<string, Agent> {
+  const rows = db.prepare('SELECT * FROM agents ORDER BY created_at').all() as Array<{
+    id: string;
+    slug: string;
+    display_name: string;
+    workspace_folder: string;
+    profile: Agent['profile'];
+    policy_overrides: string | null;
+    container_config: string | null;
+    is_admin: number;
+    created_at: string;
+    status: Agent['status'];
+  }>;
+  const result: Record<string, Agent> = {};
+  for (const row of rows) {
+    result[row.id] = {
+      id: row.id,
+      slug: row.slug,
+      displayName: row.display_name,
+      workspaceFolder: row.workspace_folder,
+      profile: row.profile,
+      policyOverrides: row.policy_overrides
+        ? (JSON.parse(row.policy_overrides) as AgentPolicyOverrides)
+        : undefined,
+      containerConfig: row.container_config
+        ? JSON.parse(row.container_config)
+        : undefined,
+      isAdmin: row.is_admin === 1,
+      createdAt: row.created_at,
+      status: row.status,
+    };
+  }
+  return result;
+}
+
+export function setAgent(agent: Agent): void {
+  if (!isValidGroupFolder(agent.workspaceFolder)) {
+    throw new Error(`Invalid workspace folder "${agent.workspaceFolder}"`);
+  }
+  db.prepare(
+    `INSERT OR REPLACE INTO agents
+      (id, slug, display_name, workspace_folder, profile, policy_overrides, container_config, is_admin, created_at, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    agent.id,
+    agent.slug,
+    agent.displayName,
+    agent.workspaceFolder,
+    agent.profile,
+    agent.policyOverrides ? JSON.stringify(agent.policyOverrides) : null,
+    agent.containerConfig ? JSON.stringify(agent.containerConfig) : null,
+    agent.isAdmin ? 1 : 0,
+    agent.createdAt,
+    agent.status,
+  );
+}
+
+export function getIdentityBinding(
+  chatJid: string,
+): IdentityBinding | undefined {
+  const row = db
+    .prepare('SELECT * FROM identity_bindings WHERE chat_jid = ?')
+    .get(chatJid) as
+    | {
+        chat_jid: string;
+        channel: string;
+        agent_id: string;
+        kind: IdentityBinding['kind'];
+        created_at: string;
+        enabled: number;
+        requires_trigger: number | null;
+        is_admin: number;
+      }
+    | undefined;
+  if (!row) return undefined;
+  return {
+    chatJid: row.chat_jid,
+    channel: row.channel,
+    agentId: row.agent_id,
+    kind: row.kind,
+    createdAt: row.created_at,
+    enabled: row.enabled === 1,
+    requiresTrigger:
+      row.requires_trigger === null ? undefined : row.requires_trigger === 1,
+    isAdmin: row.is_admin === 1,
+  };
+}
+
+export function getAllIdentityBindings(): Record<string, IdentityBinding> {
+  const rows = db
+    .prepare('SELECT * FROM identity_bindings ORDER BY created_at')
+    .all() as Array<{
+    chat_jid: string;
+    channel: string;
+    agent_id: string;
+    kind: IdentityBinding['kind'];
+    created_at: string;
+    enabled: number;
+    requires_trigger: number | null;
+    is_admin: number;
+  }>;
+  const result: Record<string, IdentityBinding> = {};
+  for (const row of rows) {
+    result[row.chat_jid] = {
+      chatJid: row.chat_jid,
+      channel: row.channel,
+      agentId: row.agent_id,
+      kind: row.kind,
+      createdAt: row.created_at,
+      enabled: row.enabled === 1,
+      requiresTrigger:
+        row.requires_trigger === null ? undefined : row.requires_trigger === 1,
+      isAdmin: row.is_admin === 1,
+    };
+  }
+  return result;
+}
+
+export function getIdentityBindingsForAgent(agentId: string): IdentityBinding[] {
+  const rows = db
+    .prepare('SELECT * FROM identity_bindings WHERE agent_id = ? ORDER BY created_at')
+    .all(agentId) as Array<{
+    chat_jid: string;
+    channel: string;
+    agent_id: string;
+    kind: IdentityBinding['kind'];
+    created_at: string;
+    enabled: number;
+    requires_trigger: number | null;
+    is_admin: number;
+  }>;
+  return rows.map((row) => ({
+    chatJid: row.chat_jid,
+    channel: row.channel,
+    agentId: row.agent_id,
+    kind: row.kind,
+    createdAt: row.created_at,
+    enabled: row.enabled === 1,
+    requiresTrigger:
+      row.requires_trigger === null ? undefined : row.requires_trigger === 1,
+    isAdmin: row.is_admin === 1,
+  }));
+}
+
+export function setIdentityBinding(binding: IdentityBinding): void {
+  db.prepare(
+    `INSERT OR REPLACE INTO identity_bindings
+      (chat_jid, channel, agent_id, kind, created_at, enabled, requires_trigger, is_admin)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    binding.chatJid,
+    binding.channel,
+    binding.agentId,
+    binding.kind,
+    binding.createdAt,
+    binding.enabled ? 1 : 0,
+    binding.requiresTrigger === undefined
+      ? null
+      : binding.requiresTrigger
+        ? 1
+        : 0,
+    binding.isAdmin ? 1 : 0,
+  );
+}
+
+export function disableIdentityBinding(chatJid: string): void {
+  db.prepare('UPDATE identity_bindings SET enabled = 0 WHERE chat_jid = ?').run(
+    chatJid,
+  );
+}
+
+export function getAgentForChat(chatJid: string): Agent | undefined {
+  const binding = getIdentityBinding(chatJid);
+  if (!binding || !binding.enabled) return undefined;
+  return getAgent(binding.agentId);
+}
+
 // --- Registered group accessors ---
 
 export function getRegisteredGroup(
@@ -632,6 +954,56 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     };
   }
   return result;
+}
+
+function migrateLegacyGroupsToAgents(): void {
+  const groups = db.prepare('SELECT * FROM registered_groups').all() as Array<{
+    jid: string;
+    name: string;
+    folder: string;
+    container_config: string | null;
+    requires_trigger: number | null;
+    is_main: number | null;
+    added_at: string;
+  }>;
+
+  for (const group of groups) {
+    if (!isValidGroupFolder(group.folder)) continue;
+
+    const agentId = group.folder;
+    if (!getAgent(agentId)) {
+      setAgent({
+        id: agentId,
+        slug: group.folder,
+        displayName: group.name,
+        workspaceFolder: group.folder,
+        profile: group.is_main === 1 ? 'admin' : 'adult',
+        containerConfig: group.container_config
+          ? JSON.parse(group.container_config)
+          : undefined,
+        isAdmin: group.is_main === 1,
+        createdAt: group.added_at,
+        status: 'active',
+      });
+    }
+
+    if (!getIdentityBinding(group.jid)) {
+      const chat = getChatMetadata(group.jid);
+      setIdentityBinding({
+        chatJid: group.jid,
+        channel: chat?.channel || inferChannelFromJid(group.jid),
+        agentId,
+        kind: chat?.is_group ? 'group' : 'private',
+        createdAt: group.added_at,
+        enabled: true,
+        requiresTrigger:
+          group.requires_trigger === null
+            ? undefined
+            : group.requires_trigger === 1,
+        isAdmin: group.is_main === 1,
+      });
+    }
+  }
 }
 
 // --- JSON migration ---

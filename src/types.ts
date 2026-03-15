@@ -32,6 +32,56 @@ export interface ContainerConfig {
   timeout?: number; // Default: 300000 (5 minutes)
 }
 
+export type AgentProfile = 'admin' | 'adult' | 'child';
+
+export type AgentStatus = 'active' | 'disabled';
+
+export type IdentityKind = 'private' | 'group';
+
+export type AgentCapability =
+  | 'admin'
+  | 'remoteControl'
+  | 'crossAgentTaskTargeting'
+  | 'configureMounts'
+  | 'opencode';
+
+export interface AgentPolicyOverrides {
+  allowedTools?: string[];
+  disallowedTools?: string[];
+  capabilities?: Partial<Record<AgentCapability, boolean>>;
+}
+
+export interface AgentPolicy {
+  profile: AgentProfile;
+  allowedTools: string[];
+  disallowedTools: string[];
+  capabilities: Record<AgentCapability, boolean>;
+}
+
+export interface Agent {
+  id: string;
+  slug: string;
+  displayName: string;
+  workspaceFolder: string;
+  profile: AgentProfile;
+  policyOverrides?: AgentPolicyOverrides;
+  containerConfig?: ContainerConfig;
+  isAdmin?: boolean;
+  createdAt: string;
+  status: AgentStatus;
+}
+
+export interface IdentityBinding {
+  chatJid: string;
+  channel: string;
+  agentId: string;
+  kind: IdentityKind;
+  createdAt: string;
+  enabled: boolean;
+  requiresTrigger?: boolean;
+  isAdmin?: boolean;
+}
+
 export interface RegisteredGroup {
   name: string;
   folder: string;
@@ -55,6 +105,8 @@ export interface NewMessage {
 
 export interface ScheduledTask {
   id: string;
+  agent_id?: string;
+  delivery_chat_jid?: string;
   group_folder: string;
   chat_jid: string;
   prompt: string;

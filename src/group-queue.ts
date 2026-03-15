@@ -7,7 +7,7 @@ import { logger } from './logger.js';
 
 interface QueuedTask {
   id: string;
-  groupJid: string;
+  ownerId: string;
   fn: () => Promise<void>;
 }
 
@@ -24,6 +24,7 @@ interface GroupState {
   process: ChildProcess | null;
   containerName: string | null;
   groupFolder: string | null;
+  deliveryChatJid: string | null;
   retryCount: number;
 }
 
@@ -48,6 +49,7 @@ export class GroupQueue {
         process: null,
         containerName: null,
         groupFolder: null,
+        deliveryChatJid: null,
         retryCount: 0,
       };
       this.groups.set(groupJid, state);
@@ -87,58 +89,60 @@ export class GroupQueue {
     );
   }
 
-  enqueueTask(groupJid: string, taskId: string, fn: () => Promise<void>): void {
+  enqueueTask(ownerId: string, taskId: string, fn: () => Promise<void>): void {
     if (this.shuttingDown) return;
 
-    const state = this.getGroup(groupJid);
+    const state = this.getGroup(ownerId);
 
     // Prevent double-queuing: check both pending and currently-running task
     if (state.runningTaskId === taskId) {
-      logger.debug({ groupJid, taskId }, 'Task already running, skipping');
+      logger.debug({ groupJid: ownerId, taskId }, 'Task already running, skipping');
       return;
     }
     if (state.pendingTasks.some((t) => t.id === taskId)) {
-      logger.debug({ groupJid, taskId }, 'Task already queued, skipping');
+      logger.debug({ groupJid: ownerId, taskId }, 'Task already queued, skipping');
       return;
     }
 
     if (state.active) {
-      state.pendingTasks.push({ id: taskId, groupJid, fn });
+      state.pendingTasks.push({ id: taskId, ownerId, fn });
       if (state.idleWaiting) {
-        this.closeStdin(groupJid);
+        this.closeStdin(ownerId);
       }
-      logger.debug({ groupJid, taskId }, 'Container active, task queued');
+      logger.debug({ groupJid: ownerId, taskId }, 'Container active, task queued');
       return;
     }
 
     if (this.activeCount >= MAX_CONCURRENT_CONTAINERS) {
-      state.pendingTasks.push({ id: taskId, groupJid, fn });
-      if (!this.waitingGroups.includes(groupJid)) {
-        this.waitingGroups.push(groupJid);
+      state.pendingTasks.push({ id: taskId, ownerId, fn });
+      if (!this.waitingGroups.includes(ownerId)) {
+        this.waitingGroups.push(ownerId);
       }
       logger.debug(
-        { groupJid, taskId, activeCount: this.activeCount },
+        { groupJid: ownerId, taskId, activeCount: this.activeCount },
         'At concurrency limit, task queued',
       );
       return;
     }
 
     // Run immediately
-    this.runTask(groupJid, { id: taskId, groupJid, fn }).catch((err) =>
-      logger.error({ groupJid, taskId, err }, 'Unhandled error in runTask'),
+    this.runTask(ownerId, { id: taskId, ownerId, fn }).catch((err) =>
+      logger.error({ groupJid: ownerId, taskId, err }, 'Unhandled error in runTask'),
     );
   }
 
   registerProcess(
-    groupJid: string,
+    ownerId: string,
     proc: ChildProcess,
     containerName: string,
     groupFolder?: string,
+    deliveryChatJid?: string,
   ): void {
-    const state = this.getGroup(groupJid);
+    const state = this.getGroup(ownerId);
     state.process = proc;
     state.containerName = containerName;
     if (groupFolder) state.groupFolder = groupFolder;
+    if (deliveryChatJid) state.deliveryChatJid = deliveryChatJid;
   }
 
   /**
@@ -157,10 +161,17 @@ export class GroupQueue {
    * Send a follow-up message to the active container via IPC file.
    * Returns true if the message was written, false if no active container.
    */
-  sendMessage(groupJid: string, text: string): boolean {
-    const state = this.getGroup(groupJid);
+  sendMessage(ownerId: string, text: string, deliveryChatJid?: string): boolean {
+    const state = this.getGroup(ownerId);
     if (!state.active || !state.groupFolder || state.isTaskContainer)
       return false;
+    if (
+      deliveryChatJid !== undefined &&
+      state.deliveryChatJid !== null &&
+      state.deliveryChatJid !== deliveryChatJid
+    ) {
+      return false;
+    }
     state.idleWaiting = false; // Agent is about to receive work, no longer idle
 
     const inputDir = path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
@@ -175,6 +186,14 @@ export class GroupQueue {
     } catch {
       return false;
     }
+  }
+
+  isActive(ownerId: string): boolean {
+    return this.getGroup(ownerId).active;
+  }
+
+  getActiveDeliveryChatJid(ownerId: string): string | null {
+    return this.getGroup(ownerId).deliveryChatJid;
   }
 
   /**
@@ -226,6 +245,7 @@ export class GroupQueue {
       state.process = null;
       state.containerName = null;
       state.groupFolder = null;
+      state.deliveryChatJid = null;
       this.activeCount--;
       this.drainGroup(groupJid);
     }
@@ -255,6 +275,7 @@ export class GroupQueue {
       state.process = null;
       state.containerName = null;
       state.groupFolder = null;
+      state.deliveryChatJid = null;
       this.activeCount--;
       this.drainGroup(groupJid);
     }

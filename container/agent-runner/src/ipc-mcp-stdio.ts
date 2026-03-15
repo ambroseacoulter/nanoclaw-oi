@@ -17,6 +17,7 @@ const TASKS_DIR = path.join(IPC_DIR, 'tasks');
 
 // Context from environment variables (set by the agent runner)
 const chatJid = process.env.NANOCLAW_CHAT_JID!;
+const agentId = process.env.NANOCLAW_AGENT_ID!;
 const groupFolder = process.env.NANOCLAW_GROUP_FOLDER!;
 const isMain = process.env.NANOCLAW_IS_MAIN === '1';
 
@@ -140,7 +141,9 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
       schedule_value: args.schedule_value,
       context_mode: args.context_mode || 'group',
       targetJid,
-      createdBy: groupFolder,
+      targetAgentId: isMain ? undefined : agentId,
+      deliveryChatJid: targetJid,
+      createdBy: agentId,
       timestamp: new Date().toISOString(),
     };
 
@@ -148,6 +151,124 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
 
     return {
       content: [{ type: 'text' as const, text: `Task ${taskId} scheduled: ${args.schedule_type} - ${args.schedule_value}` }],
+    };
+  },
+);
+
+server.tool(
+  'create_agent',
+  'Admin only. Create a new personal agent record. Use bind_identity after this to attach a chat.',
+  {
+    agent_id: z.string().describe('Stable ID for the agent, usually matching the workspace folder'),
+    slug: z.string().describe('Human-readable stable slug'),
+    display_name: z.string().describe('Display name for the agent'),
+    workspace_folder: z.string().describe('Workspace folder name under groups/'),
+    profile: z.enum(['admin', 'adult', 'child']).default('adult'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [{ type: 'text' as const, text: 'Only the admin agent can create agents.' }],
+        isError: true,
+      };
+    }
+    writeIpcFile(TASKS_DIR, {
+      type: 'create_agent',
+      agentId: args.agent_id,
+      slug: args.slug,
+      displayName: args.display_name,
+      workspaceFolder: args.workspace_folder,
+      profile: args.profile,
+    });
+    return {
+      content: [{ type: 'text' as const, text: `Agent ${args.agent_id} creation requested.` }],
+    };
+  },
+);
+
+server.tool(
+  'bind_identity',
+  'Admin only. Bind a private chat identity to an existing personal agent.',
+  {
+    agent_id: z.string().describe('Agent ID to bind the chat to'),
+    chat_jid: z.string().describe('Chat JID to bind'),
+    channel: z.string().describe('Channel name for the chat'),
+    kind: z.enum(['private', 'group']).default('private'),
+    requires_trigger: z.boolean().optional(),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [{ type: 'text' as const, text: 'Only the admin agent can bind identities.' }],
+        isError: true,
+      };
+    }
+    writeIpcFile(TASKS_DIR, {
+      type: 'bind_identity',
+      agentId: args.agent_id,
+      chatJid: args.chat_jid,
+      channel: args.channel,
+      kind: args.kind,
+      requiresTrigger: args.requires_trigger,
+    });
+    return {
+      content: [{ type: 'text' as const, text: `Binding ${args.chat_jid} -> ${args.agent_id} requested.` }],
+    };
+  },
+);
+
+server.tool(
+  'update_agent',
+  'Admin only. Update an agent profile or policy overrides.',
+  {
+    agent_id: z.string().describe('Agent ID to update'),
+    profile: z.enum(['admin', 'adult', 'child']).optional(),
+    display_name: z.string().optional(),
+    policy_overrides_json: z.string().optional().describe('JSON object for policy overrides'),
+    status: z.enum(['active', 'disabled']).optional(),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [{ type: 'text' as const, text: 'Only the admin agent can update agents.' }],
+        isError: true,
+      };
+    }
+    writeIpcFile(TASKS_DIR, {
+      type: 'update_agent',
+      agentId: args.agent_id,
+      profile: args.profile,
+      displayName: args.display_name,
+      policyOverrides: args.policy_overrides_json
+        ? JSON.parse(args.policy_overrides_json)
+        : undefined,
+      status: args.status,
+    });
+    return {
+      content: [{ type: 'text' as const, text: `Agent ${args.agent_id} update requested.` }],
+    };
+  },
+);
+
+server.tool(
+  'disable_identity',
+  'Admin only. Disable a bound identity so messages from that chat stop routing.',
+  {
+    chat_jid: z.string().describe('Chat JID to disable'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [{ type: 'text' as const, text: 'Only the admin agent can disable identities.' }],
+        isError: true,
+      };
+    }
+    writeIpcFile(TASKS_DIR, {
+      type: 'disable_identity',
+      chatJid: args.chat_jid,
+    });
+    return {
+      content: [{ type: 'text' as const, text: `Identity ${args.chat_jid} disable requested.` }],
     };
   },
 );

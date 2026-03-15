@@ -23,8 +23,11 @@ interface ContainerInput {
   prompt: string;
   sessionId?: string;
   groupFolder: string;
-  chatJid: string;
-  isMain: boolean;
+  agentId: string;
+  deliveryChatJid: string;
+  isAdmin: boolean;
+  allowedTools?: string[];
+  disallowedTools?: string[];
   isScheduledTask?: boolean;
   assistantName?: string;
 }
@@ -366,13 +369,6 @@ async function runQuery(
   let messageCount = 0;
   let resultCount = 0;
 
-  // Load global CLAUDE.md as additional system context (shared across all groups)
-  const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
-  let globalClaudeMd: string | undefined;
-  if (!containerInput.isMain && fs.existsSync(globalClaudeMdPath)) {
-    globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
-  }
-
   // Discover additional directories mounted at /workspace/extra/*
   // These are passed to the SDK so their CLAUDE.md files are loaded automatically
   const extraDirs: string[] = [];
@@ -396,19 +392,8 @@ async function runQuery(
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,
-      systemPrompt: globalClaudeMd
-        ? { type: 'preset' as const, preset: 'claude_code' as const, append: globalClaudeMd }
-        : undefined,
-      allowedTools: [
-        'Bash',
-        'Read', 'Write', 'Edit', 'Glob', 'Grep',
-        'WebSearch', 'WebFetch',
-        'Task', 'TaskOutput', 'TaskStop',
-        'TeamCreate', 'TeamDelete', 'SendMessage',
-        'TodoWrite', 'ToolSearch', 'Skill',
-        'NotebookEdit',
-        'mcp__nanoclaw__*'
-      ],
+      allowedTools: containerInput.allowedTools,
+      disallowedTools: containerInput.disallowedTools,
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
@@ -418,9 +403,10 @@ async function runQuery(
           command: 'node',
           args: [mcpServerPath],
           env: {
-            NANOCLAW_CHAT_JID: containerInput.chatJid,
+            NANOCLAW_CHAT_JID: containerInput.deliveryChatJid,
             NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
-            NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+            NANOCLAW_AGENT_ID: containerInput.agentId,
+            NANOCLAW_IS_MAIN: containerInput.isAdmin ? '1' : '0',
           },
         },
       },

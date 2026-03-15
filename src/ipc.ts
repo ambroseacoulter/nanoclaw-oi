@@ -8,12 +8,17 @@ import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
-import { RegisteredGroup } from './types.js';
+import { canAdmin, canTargetOtherAgents } from './policy.js';
+import { Agent, IdentityBinding, RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  agents?: () => Record<string, Agent>;
+  identityBindings?: () => Record<string, IdentityBinding>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
+  setAgent?: (agent: Agent) => void;
+  setIdentityBinding?: (binding: IdentityBinding) => void;
   syncGroups: (force: boolean) => Promise<void>;
   getAvailableGroups: () => AvailableGroup[];
   writeGroupsSnapshot: (
@@ -25,6 +30,59 @@ export interface IpcDeps {
 }
 
 let ipcWatcherRunning = false;
+
+function legacyAgentsFromGroups(
+  groups: Record<string, RegisteredGroup>,
+): Record<string, Agent> {
+  const result: Record<string, Agent> = {};
+  for (const group of Object.values(groups)) {
+    result[group.folder] = {
+      id: group.folder,
+      slug: group.folder,
+      displayName: group.name,
+      workspaceFolder: group.folder,
+      profile: group.isMain ? 'admin' : 'adult',
+      policyOverrides: undefined,
+      containerConfig: group.containerConfig,
+      isAdmin: group.isMain === true,
+      createdAt: group.added_at,
+      status: 'active',
+    };
+  }
+  return result;
+}
+
+function legacyBindingsFromGroups(
+  groups: Record<string, RegisteredGroup>,
+): Record<string, IdentityBinding> {
+  const result: Record<string, IdentityBinding> = {};
+  for (const [jid, group] of Object.entries(groups)) {
+    result[jid] = {
+      chatJid: jid,
+      channel: 'unknown',
+      agentId: group.folder,
+      kind: 'group',
+      createdAt: group.added_at,
+      enabled: true,
+      requiresTrigger: group.requiresTrigger,
+      isAdmin: group.isMain === true,
+    };
+  }
+  return result;
+}
+
+function getDefaultDeliveryChat(
+  bindings: Record<string, IdentityBinding>,
+  agentId: string,
+): string {
+  const binding = Object.values(bindings).find(
+    (item) => item.agentId === agentId && item.enabled,
+  );
+  if (!binding) {
+    throw new Error(`No enabled delivery chat for agent ${agentId}`);
+  }
+  return binding.chatJid;
+}
 
 export function startIpcWatcher(deps: IpcDeps): void {
   if (ipcWatcherRunning) {
@@ -51,11 +109,14 @@ export function startIpcWatcher(deps: IpcDeps): void {
     }
 
     const registeredGroups = deps.registeredGroups();
+    const agents = deps.agents?.() || legacyAgentsFromGroups(registeredGroups);
+    const bindings =
+      deps.identityBindings?.() || legacyBindingsFromGroups(registeredGroups);
 
-    // Build folder→isMain lookup from registered groups
+    // Build agentId→isAdmin lookup.
     const folderIsMain = new Map<string, boolean>();
-    for (const group of Object.values(registeredGroups)) {
-      if (group.isMain) folderIsMain.set(group.folder, true);
+    for (const agent of Object.values(agents)) {
+      if (agent.isAdmin) folderIsMain.set(agent.id, true);
     }
 
     for (const sourceGroup of groupFolders) {
@@ -74,11 +135,10 @@ export function startIpcWatcher(deps: IpcDeps): void {
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               if (data.type === 'message' && data.chatJid && data.text) {
-                // Authorization: verify this group can send to this chatJid
-                const targetGroup = registeredGroups[data.chatJid];
+                const targetBinding = bindings[data.chatJid];
                 if (
                   isMain ||
-                  (targetGroup && targetGroup.folder === sourceGroup)
+                  (targetBinding && targetBinding.agentId === sourceGroup)
                 ) {
                   await deps.sendMessage(data.chatJid, data.text);
                   logger.info(
@@ -164,6 +224,8 @@ export async function processTaskIpc(
     groupFolder?: string;
     chatJid?: string;
     targetJid?: string;
+    targetAgentId?: string;
+    deliveryChatJid?: string;
     // For register_group
     jid?: string;
     name?: string;
@@ -171,12 +233,31 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
+    // For create/update agent
+    agentId?: string;
+    slug?: string;
+    displayName?: string;
+    workspaceFolder?: string;
+    profile?: Agent['profile'];
+    policyOverrides?: Agent['policyOverrides'];
+    status?: Agent['status'];
+    enabled?: boolean;
+    kind?: IdentityBinding['kind'];
+    channel?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
   deps: IpcDeps,
 ): Promise<void> {
   const registeredGroups = deps.registeredGroups();
+  const agents = deps.agents?.() || legacyAgentsFromGroups(registeredGroups);
+  const bindings =
+    deps.identityBindings?.() || legacyBindingsFromGroups(registeredGroups);
+  const sourceAgent = agents[sourceGroup];
+  const isAdmin = sourceAgent ? canAdmin(sourceAgent) : isMain;
+  const canTargetOther = sourceAgent
+    ? canTargetOtherAgents(sourceAgent)
+    : isMain;
 
   switch (data.type) {
     case 'schedule_task':
@@ -184,26 +265,24 @@ export async function processTaskIpc(
         data.prompt &&
         data.schedule_type &&
         data.schedule_value &&
-        data.targetJid
+        (data.targetJid || data.targetAgentId)
       ) {
-        // Resolve the target group from JID
-        const targetJid = data.targetJid as string;
-        const targetGroupEntry = registeredGroups[targetJid];
-
-        if (!targetGroupEntry) {
+        const targetJid = data.targetJid as string | undefined;
+        const targetBinding = targetJid ? bindings[targetJid] : undefined;
+        const targetAgentId = data.targetAgentId || targetBinding?.agentId;
+        const targetAgent = targetAgentId ? agents[targetAgentId] : undefined;
+        if (!targetAgent) {
           logger.warn(
-            { targetJid },
-            'Cannot schedule task: target group not registered',
+            { targetJid, targetAgentId },
+            'Cannot schedule task: target agent not registered',
           );
           break;
         }
 
-        const targetFolder = targetGroupEntry.folder;
-
-        // Authorization: non-main groups can only schedule for themselves
-        if (!isMain && targetFolder !== sourceGroup) {
+        // Non-admin agents can only schedule for themselves.
+        if (!canTargetOther && targetAgent.id !== sourceGroup) {
           logger.warn(
-            { sourceGroup, targetFolder },
+            { sourceGroup, targetAgentId: targetAgent.id },
             'Unauthorized schedule_task attempt blocked',
           );
           break;
@@ -256,8 +335,14 @@ export async function processTaskIpc(
             : 'isolated';
         createTask({
           id: taskId,
-          group_folder: targetFolder,
-          chat_jid: targetJid,
+          agent_id: targetAgent.id,
+          delivery_chat_jid:
+            data.deliveryChatJid ||
+            targetJid ||
+            getDefaultDeliveryChat(bindings, targetAgent.id),
+          group_folder: targetAgent.workspaceFolder,
+          chat_jid:
+            targetJid || getDefaultDeliveryChat(bindings, targetAgent.id),
           prompt: data.prompt,
           schedule_type: scheduleType,
           schedule_value: data.schedule_value,
@@ -267,7 +352,7 @@ export async function processTaskIpc(
           created_at: new Date().toISOString(),
         });
         logger.info(
-          { taskId, sourceGroup, targetFolder, contextMode },
+          { taskId, sourceGroup, targetAgentId: targetAgent.id, contextMode },
           'Task created via IPC',
         );
       }
@@ -276,7 +361,7 @@ export async function processTaskIpc(
     case 'pause_task':
       if (data.taskId) {
         const task = getTaskById(data.taskId);
-        if (task && (isMain || task.group_folder === sourceGroup)) {
+        if (task && (isAdmin || task.agent_id === sourceGroup)) {
           updateTask(data.taskId, { status: 'paused' });
           logger.info(
             { taskId: data.taskId, sourceGroup },
@@ -294,7 +379,7 @@ export async function processTaskIpc(
     case 'resume_task':
       if (data.taskId) {
         const task = getTaskById(data.taskId);
-        if (task && (isMain || task.group_folder === sourceGroup)) {
+        if (task && (isAdmin || task.agent_id === sourceGroup)) {
           updateTask(data.taskId, { status: 'active' });
           logger.info(
             { taskId: data.taskId, sourceGroup },
@@ -312,7 +397,7 @@ export async function processTaskIpc(
     case 'cancel_task':
       if (data.taskId) {
         const task = getTaskById(data.taskId);
-        if (task && (isMain || task.group_folder === sourceGroup)) {
+        if (task && (isAdmin || task.agent_id === sourceGroup)) {
           deleteTask(data.taskId);
           logger.info(
             { taskId: data.taskId, sourceGroup },
@@ -337,7 +422,7 @@ export async function processTaskIpc(
           );
           break;
         }
-        if (!isMain && task.group_folder !== sourceGroup) {
+        if (!isAdmin && task.agent_id !== sourceGroup) {
           logger.warn(
             { taskId: data.taskId, sourceGroup },
             'Unauthorized task update attempt',
@@ -392,8 +477,7 @@ export async function processTaskIpc(
       break;
 
     case 'refresh_groups':
-      // Only main group can request a refresh
-      if (isMain) {
+      if (isAdmin) {
         logger.info(
           { sourceGroup },
           'Group metadata refresh requested via IPC',
@@ -405,7 +489,7 @@ export async function processTaskIpc(
           sourceGroup,
           true,
           availableGroups,
-          new Set(Object.keys(registeredGroups)),
+          new Set(Object.keys(bindings)),
         );
       } else {
         logger.warn(
@@ -416,8 +500,7 @@ export async function processTaskIpc(
       break;
 
     case 'register_group':
-      // Only main group can register new groups
-      if (!isMain) {
+      if (!isAdmin) {
         logger.warn(
           { sourceGroup },
           'Unauthorized register_group attempt blocked',
@@ -446,6 +529,107 @@ export async function processTaskIpc(
           { data },
           'Invalid register_group request - missing required fields',
         );
+      }
+      break;
+
+    case 'create_agent':
+      if (!isAdmin) {
+        logger.warn({ sourceGroup }, 'Unauthorized create_agent attempt blocked');
+        break;
+      }
+      if (
+        data.agentId &&
+        data.slug &&
+        data.displayName &&
+        data.workspaceFolder &&
+        isValidGroupFolder(data.agentId) &&
+        isValidGroupFolder(data.workspaceFolder) &&
+        deps.setAgent
+      ) {
+        deps.setAgent({
+          id: data.agentId,
+          slug: data.slug,
+          displayName: data.displayName,
+          workspaceFolder: data.workspaceFolder,
+          profile: data.profile || 'adult',
+          policyOverrides: data.policyOverrides,
+          containerConfig: undefined,
+          isAdmin: data.profile === 'admin',
+          createdAt: new Date().toISOString(),
+          status: data.status || 'active',
+        });
+      } else {
+        logger.warn({ data }, 'Invalid create_agent request');
+      }
+      break;
+
+    case 'bind_identity':
+      if (!isAdmin) {
+        logger.warn({ sourceGroup }, 'Unauthorized bind_identity attempt blocked');
+        break;
+      }
+      if (data.chatJid && data.agentId && deps.setIdentityBinding) {
+        if (!agents[data.agentId]) {
+          logger.warn({ agentId: data.agentId }, 'Agent not found for bind_identity');
+          break;
+        }
+        deps.setIdentityBinding({
+          chatJid: data.chatJid,
+          channel: data.channel || 'unknown',
+          agentId: data.agentId,
+          kind: data.kind || 'private',
+          createdAt: new Date().toISOString(),
+          enabled: data.enabled !== false,
+          requiresTrigger: data.requiresTrigger,
+          isAdmin: agents[data.agentId]?.isAdmin === true,
+        });
+      } else {
+        logger.warn({ data }, 'Invalid bind_identity request');
+      }
+      break;
+
+    case 'update_agent':
+      if (!isAdmin) {
+        logger.warn({ sourceGroup }, 'Unauthorized update_agent attempt blocked');
+        break;
+      }
+      if (data.agentId && deps.setAgent) {
+        const existing = agents[data.agentId];
+        if (!existing) {
+          logger.warn({ agentId: data.agentId }, 'Agent not found for update');
+          break;
+        }
+        deps.setAgent({
+          ...existing,
+          displayName: data.displayName || existing.displayName,
+          profile: data.profile || existing.profile,
+          policyOverrides: data.policyOverrides || existing.policyOverrides,
+          status: data.status || existing.status,
+          isAdmin:
+            data.profile === 'admin'
+              ? true
+              : data.profile
+                ? false
+                : existing.isAdmin,
+        });
+      }
+      break;
+
+    case 'disable_identity':
+      if (!isAdmin) {
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized disable_identity attempt blocked',
+        );
+        break;
+      }
+      if (data.chatJid && deps.setIdentityBinding) {
+        const existing = bindings[data.chatJid];
+        if (!existing) break;
+        deps.setIdentityBinding({
+          ...existing,
+          enabled: false,
+        });
       }
       break;
 
