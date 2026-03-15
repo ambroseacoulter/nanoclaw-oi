@@ -134,10 +134,7 @@ async function runTask(
     })();
 
   if (!agent) {
-    logger.error(
-      { taskId: task.id, agentId },
-      'Agent not found for task',
-    );
+    logger.error({ taskId: task.id, agentId }, 'Agent not found for task');
     logTaskRun({
       task_id: task.id,
       run_at: new Date().toISOString(),
@@ -298,8 +295,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         deps.queue.enqueueTask(
           currentTask.agent_id || currentTask.group_folder,
           currentTask.id,
-          () =>
-          runTask(currentTask, deps),
+          () => runTask(currentTask, deps),
         );
       }
     } catch (err) {

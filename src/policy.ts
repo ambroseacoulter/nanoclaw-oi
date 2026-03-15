@@ -86,19 +86,21 @@ export function resolveAgentPolicy(
       ...(capabilities.opencode ? ['opencode'] : []),
     ]),
   );
-  const disallowedTools = Array.from(
-    new Set(overrides.disallowedTools || []),
-  );
+  const disallowedTools = Array.from(new Set(overrides.disallowedTools || []));
 
   return {
     profile,
-    allowedTools: allowedTools.filter((tool) => !disallowedTools.includes(tool)),
+    allowedTools: allowedTools.filter(
+      (tool) => !disallowedTools.includes(tool),
+    ),
     disallowedTools,
     capabilities,
   };
 }
 
-export function canAdmin(agent: Pick<Agent, 'profile' | 'policyOverrides' | 'isAdmin'>): boolean {
+export function canAdmin(
+  agent: Pick<Agent, 'profile' | 'policyOverrides' | 'isAdmin'>,
+): boolean {
   return resolveAgentPolicy(agent).capabilities.admin;
 }
 

@@ -534,7 +534,10 @@ export async function processTaskIpc(
 
     case 'create_agent':
       if (!isAdmin) {
-        logger.warn({ sourceGroup }, 'Unauthorized create_agent attempt blocked');
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized create_agent attempt blocked',
+        );
         break;
       }
       if (
@@ -565,12 +568,18 @@ export async function processTaskIpc(
 
     case 'bind_identity':
       if (!isAdmin) {
-        logger.warn({ sourceGroup }, 'Unauthorized bind_identity attempt blocked');
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized bind_identity attempt blocked',
+        );
         break;
       }
       if (data.chatJid && data.agentId && deps.setIdentityBinding) {
         if (!agents[data.agentId]) {
-          logger.warn({ agentId: data.agentId }, 'Agent not found for bind_identity');
+          logger.warn(
+            { agentId: data.agentId },
+            'Agent not found for bind_identity',
+          );
           break;
         }
         deps.setIdentityBinding({
@@ -590,7 +599,10 @@ export async function processTaskIpc(
 
     case 'update_agent':
       if (!isAdmin) {
-        logger.warn({ sourceGroup }, 'Unauthorized update_agent attempt blocked');
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized update_agent attempt blocked',
+        );
         break;
       }
       if (data.agentId && deps.setAgent) {

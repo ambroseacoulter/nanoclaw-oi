@@ -96,11 +96,17 @@ export class GroupQueue {
 
     // Prevent double-queuing: check both pending and currently-running task
     if (state.runningTaskId === taskId) {
-      logger.debug({ groupJid: ownerId, taskId }, 'Task already running, skipping');
+      logger.debug(
+        { groupJid: ownerId, taskId },
+        'Task already running, skipping',
+      );
       return;
     }
     if (state.pendingTasks.some((t) => t.id === taskId)) {
-      logger.debug({ groupJid: ownerId, taskId }, 'Task already queued, skipping');
+      logger.debug(
+        { groupJid: ownerId, taskId },
+        'Task already queued, skipping',
+      );
       return;
     }
 
@@ -109,7 +115,10 @@ export class GroupQueue {
       if (state.idleWaiting) {
         this.closeStdin(ownerId);
       }
-      logger.debug({ groupJid: ownerId, taskId }, 'Container active, task queued');
+      logger.debug(
+        { groupJid: ownerId, taskId },
+        'Container active, task queued',
+      );
       return;
     }
 
@@ -127,7 +136,10 @@ export class GroupQueue {
 
     // Run immediately
     this.runTask(ownerId, { id: taskId, ownerId, fn }).catch((err) =>
-      logger.error({ groupJid: ownerId, taskId, err }, 'Unhandled error in runTask'),
+      logger.error(
+        { groupJid: ownerId, taskId, err },
+        'Unhandled error in runTask',
+      ),
     );
   }
 
@@ -161,7 +173,11 @@ export class GroupQueue {
    * Send a follow-up message to the active container via IPC file.
    * Returns true if the message was written, false if no active container.
    */
-  sendMessage(ownerId: string, text: string, deliveryChatJid?: string): boolean {
+  sendMessage(
+    ownerId: string,
+    text: string,
+    deliveryChatJid?: string,
+  ): boolean {
     const state = this.getGroup(ownerId);
     if (!state.active || !state.groupFolder || state.isTaskContainer)
       return false;

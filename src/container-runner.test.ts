@@ -28,6 +28,17 @@ vi.mock('./logger.js', () => ({
   },
 }));
 
+const mockEnvConfig: Record<string, string> = {};
+vi.mock('./env.js', () => ({
+  readEnvFile: vi.fn((keys: string[]) => {
+    const result: Record<string, string> = {};
+    for (const key of keys) {
+      if (mockEnvConfig[key]) result[key] = mockEnvConfig[key];
+    }
+    return result;
+  }),
+}));
+
 // Mock fs
 vi.mock('fs', async () => {
   const actual = await vi.importActual<typeof import('fs')>('fs');
@@ -49,6 +60,10 @@ vi.mock('fs', async () => {
 // Mock mount-security
 vi.mock('./mount-security.js', () => ({
   validateAdditionalMounts: vi.fn(() => []),
+}));
+
+vi.mock('./credential-proxy.js', () => ({
+  detectAuthMode: vi.fn(() => 'oauth'),
 }));
 
 // Create a controllable fake ChildProcess
@@ -87,6 +102,8 @@ vi.mock('child_process', async () => {
 });
 
 import { runContainerAgent, ContainerOutput } from './container-runner.js';
+import { spawn } from 'child_process';
+import { detectAuthMode } from './credential-proxy.js';
 import type { RegisteredGroup } from './types.js';
 
 const testGroup: RegisteredGroup = {
@@ -115,6 +132,8 @@ describe('container-runner timeout behavior', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     fakeProc = createFakeProcess();
+    vi.mocked(detectAuthMode).mockReturnValue('oauth');
+    for (const key of Object.keys(mockEnvConfig)) delete mockEnvConfig[key];
   });
 
   afterEach(() => {
@@ -206,5 +225,26 @@ describe('container-runner timeout behavior', () => {
     const result = await resultPromise;
     expect(result.status).toBe('success');
     expect(result.newSessionId).toBe('session-456');
+  });
+
+  it('passes ANTHROPIC_AUTH_TOKEN placeholder and selected model into the container', async () => {
+    vi.mocked(detectAuthMode).mockReturnValue('auth-token');
+    mockEnvConfig.ANTHROPIC_MODEL = 'moonshotai/kimi-k2.5';
+
+    const resultPromise = runContainerAgent(testGroup, testInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await resultPromise;
+
+    expect(spawn).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.arrayContaining([
+        '-e',
+        'ANTHROPIC_AUTH_TOKEN=placeholder',
+        '-e',
+        'ANTHROPIC_MODEL=moonshotai/kimi-k2.5',
+      ]),
+      expect.any(Object),
+    );
   });
 });

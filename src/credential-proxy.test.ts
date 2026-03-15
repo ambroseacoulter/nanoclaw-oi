@@ -11,7 +11,7 @@ vi.mock('./logger.js', () => ({
   logger: { info: vi.fn(), error: vi.fn(), debug: vi.fn(), warn: vi.fn() },
 }));
 
-import { startCredentialProxy } from './credential-proxy.js';
+import { detectAuthMode, startCredentialProxy } from './credential-proxy.js';
 
 function makeRequest(
   port: number,
@@ -143,6 +143,29 @@ describe('credential-proxy', () => {
     expect(lastUpstreamHeaders['authorization']).toBeUndefined();
   });
 
+  it('auth-token mode injects Bearer authorization on every request', async () => {
+    proxyPort = await startProxy({
+      ANTHROPIC_AUTH_TOKEN: 'or-real-token',
+    });
+
+    await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: {
+          'content-type': 'application/json',
+          authorization: 'Bearer placeholder',
+          'x-api-key': 'placeholder',
+        },
+      },
+      '{}',
+    );
+
+    expect(lastUpstreamHeaders['authorization']).toBe('Bearer or-real-token');
+    expect(lastUpstreamHeaders['x-api-key']).toBeUndefined();
+  });
+
   it('strips hop-by-hop headers', async () => {
     proxyPort = await startProxy({ ANTHROPIC_API_KEY: 'sk-ant-real-key' });
 
@@ -188,5 +211,13 @@ describe('credential-proxy', () => {
 
     expect(res.statusCode).toBe(502);
     expect(res.body).toBe('Bad Gateway');
+  });
+
+  it('detects auth-token mode when only ANTHROPIC_AUTH_TOKEN is set', () => {
+    Object.assign(mockEnv, {
+      ANTHROPIC_AUTH_TOKEN: 'or-real-token',
+    });
+
+    expect(detectAuthMode()).toBe('auth-token');
   });
 });

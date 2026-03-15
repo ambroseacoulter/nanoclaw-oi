@@ -647,9 +647,7 @@ function getChatMetadata(
 }
 
 export function getAgent(id: string): Agent | undefined {
-  const row = db
-    .prepare('SELECT * FROM agents WHERE id = ?')
-    .get(id) as
+  const row = db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as
     | {
         id: string;
         slug: string;
@@ -683,7 +681,9 @@ export function getAgent(id: string): Agent | undefined {
 }
 
 export function getAllAgents(): Record<string, Agent> {
-  const rows = db.prepare('SELECT * FROM agents ORDER BY created_at').all() as Array<{
+  const rows = db
+    .prepare('SELECT * FROM agents ORDER BY created_at')
+    .all() as Array<{
     id: string;
     slug: string;
     display_name: string;
@@ -800,9 +800,13 @@ export function getAllIdentityBindings(): Record<string, IdentityBinding> {
   return result;
 }
 
-export function getIdentityBindingsForAgent(agentId: string): IdentityBinding[] {
+export function getIdentityBindingsForAgent(
+  agentId: string,
+): IdentityBinding[] {
   const rows = db
-    .prepare('SELECT * FROM identity_bindings WHERE agent_id = ? ORDER BY created_at')
+    .prepare(
+      'SELECT * FROM identity_bindings WHERE agent_id = ? ORDER BY created_at',
+    )
     .all(agentId) as Array<{
     chat_jid: string;
     channel: string;

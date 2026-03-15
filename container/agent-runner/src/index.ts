@@ -392,6 +392,7 @@ async function runQuery(
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,
+      model: process.env.ANTHROPIC_MODEL || undefined,
       allowedTools: containerInput.allowedTools,
       disallowedTools: containerInput.disallowedTools,
       env: sdkEnv,

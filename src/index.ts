@@ -67,7 +67,13 @@ import {
   shouldDropMessage,
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { Agent, Channel, IdentityBinding, NewMessage, RegisteredGroup } from './types.js';
+import {
+  Agent,
+  Channel,
+  IdentityBinding,
+  NewMessage,
+  RegisteredGroup,
+} from './types.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
@@ -97,7 +103,9 @@ function normalizeAgentTimestamps(): void {
 }
 
 function hasPrivateBindings(): boolean {
-  return Object.values(identityBindings).some((binding) => binding.kind === 'private');
+  return Object.values(identityBindings).some(
+    (binding) => binding.kind === 'private',
+  );
 }
 
 function loadState(): void {
@@ -199,8 +207,7 @@ export function getAvailableGroups(): import('./container-runner.js').AvailableG
 
   return chats
     .filter(
-      (c) =>
-        c.jid !== '__group_sync__' && (includePrivateChats || c.is_group),
+      (c) => c.jid !== '__group_sync__' && (includePrivateChats || c.is_group),
     )
     .map((c) => ({
       jid: c.jid,
@@ -225,7 +232,9 @@ async function processAgentMessages(agentId: string): Promise<boolean> {
   const agent = agents[agentId];
   if (!agent || agent.status !== 'active') return true;
 
-  const bindings = getIdentityBindingsForAgent(agentId).filter((binding) => binding.enabled);
+  const bindings = getIdentityBindingsForAgent(agentId).filter(
+    (binding) => binding.enabled,
+  );
   if (bindings.length === 0) return true;
 
   const chatJids = bindings.map((binding) => binding.chatJid);
@@ -238,17 +247,24 @@ async function processAgentMessages(agentId: string): Promise<boolean> {
   if (pendingMessages.length === 0) return true;
 
   const deliveryChatJid =
-    pendingMessages[pendingMessages.length - 1]?.chat_jid || bindings[0].chatJid;
+    pendingMessages[pendingMessages.length - 1]?.chat_jid ||
+    bindings[0].chatJid;
   const deliveryBinding = identityBindings[deliveryChatJid];
   if (!deliveryBinding || !deliveryBinding.enabled) return true;
 
   const channel = findChannel(channels, deliveryChatJid);
   if (!channel) {
-    logger.warn({ chatJid: deliveryChatJid }, 'No channel owns JID, skipping messages');
+    logger.warn(
+      { chatJid: deliveryChatJid },
+      'No channel owns JID, skipping messages',
+    );
     return true;
   }
 
-  if (deliveryBinding.kind === 'group' && deliveryBinding.requiresTrigger !== false) {
+  if (
+    deliveryBinding.kind === 'group' &&
+    deliveryBinding.requiresTrigger !== false
+  ) {
     const allowlistCfg = loadSenderAllowlist();
     const hasTrigger = pendingMessages.some(
       (m) =>
@@ -273,7 +289,10 @@ async function processAgentMessages(agentId: string): Promise<boolean> {
   const resetIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
-      logger.debug({ agent: agent.displayName }, 'Idle timeout, closing container stdin');
+      logger.debug(
+        { agent: agent.displayName },
+        'Idle timeout, closing container stdin',
+      );
       queue.closeStdin(agentId);
     }, IDLE_TIMEOUT);
   };
@@ -293,7 +312,10 @@ async function processAgentMessages(agentId: string): Promise<boolean> {
             ? result.result
             : JSON.stringify(result.result);
         const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-        logger.info({ agent: agent.displayName }, `Agent output: ${raw.slice(0, 200)}`);
+        logger.info(
+          { agent: agent.displayName },
+          `Agent output: ${raw.slice(0, 200)}`,
+        );
         if (text) {
           await channel.sendMessage(deliveryChatJid, text);
           outputSentToUser = true;
@@ -518,7 +540,11 @@ async function startMessageLoop(): Promise<void> {
 
           if (queue.sendMessage(agentId, formatted, deliveryChatJid)) {
             logger.debug(
-              { agentId, chatJid: deliveryChatJid, count: messagesToSend.length },
+              {
+                agentId,
+                chatJid: deliveryChatJid,
+                count: messagesToSend.length,
+              },
               'Piped messages to active container',
             );
             lastAgentTimestamp[agentId] =
@@ -561,7 +587,11 @@ function recoverPendingMessages(): void {
       .filter((binding) => binding.enabled)
       .map((binding) => binding.chatJid);
     const sinceTimestamp = lastAgentTimestamp[agentId] || '';
-    const pending = getMessagesSinceChats(chatJids, sinceTimestamp, ASSISTANT_NAME);
+    const pending = getMessagesSinceChats(
+      chatJids,
+      sinceTimestamp,
+      ASSISTANT_NAME,
+    );
     if (pending.length > 0) {
       logger.info(
         { group: agent.displayName, pendingCount: pending.length },
@@ -629,10 +659,7 @@ async function main(): Promise<void> {
         await channel.sendMessage(chatJid, result.url);
       } else {
         const error = result.error;
-        await channel.sendMessage(
-          chatJid,
-          `Remote Control failed: ${error}`,
-        );
+        await channel.sendMessage(chatJid, `Remote Control failed: ${error}`);
       }
     } else {
       const result = stopRemoteControl();
@@ -743,9 +770,12 @@ async function main(): Promise<void> {
     setAgent: (agent) => {
       agents[agent.id] = agent;
       setAgent(agent);
-      fs.mkdirSync(path.join(resolveGroupFolderPath(agent.workspaceFolder), 'logs'), {
-        recursive: true,
-      });
+      fs.mkdirSync(
+        path.join(resolveGroupFolderPath(agent.workspaceFolder), 'logs'),
+        {
+          recursive: true,
+        },
+      );
     },
     setIdentityBinding: (binding) => {
       identityBindings[binding.chatJid] = binding;
