@@ -10,7 +10,7 @@ This replaces the previous `skills-engine/` system (three-way file merging, `.na
 
 ### Repository structure
 
-The upstream repo (`qwibitai/nanoclaw`) maintains:
+The upstream repo (`ambroseacoulter/nanoclaw-oi`) maintains:
 
 - `main` — core NanoClaw (no skill code)
 - `skill/discord` — main + Discord integration
@@ -200,11 +200,11 @@ A GitHub Action runs on every push to `main`:
 
 ### New users (recommended)
 
-1. Fork `qwibitai/nanoclaw` on GitHub (click the Fork button)
+1. Fork `ambroseacoulter/nanoclaw-oi` on GitHub (click the Fork button)
 2. Clone your fork:
    ```bash
-   git clone https://github.com/<you>/nanoclaw.git
-   cd nanoclaw
+   git clone https://github.com/<you>/nanoclaw-oi.git
+   cd nanoclaw-oi
    ```
 3. Run Claude Code:
    ```bash
@@ -216,17 +216,17 @@ Forking is recommended because it gives users a remote to push their customizati
 
 ### Existing users migrating from clone
 
-Users who previously ran `git clone https://github.com/qwibitai/nanoclaw.git` and have local customizations:
+Users who previously ran `git clone https://github.com/ambroseacoulter/nanoclaw-oi.git` and have local customizations:
 
-1. Fork `qwibitai/nanoclaw` on GitHub
+1. Fork `ambroseacoulter/nanoclaw-oi` on GitHub
 2. Reroute remotes:
    ```bash
    git remote rename origin upstream
-   git remote add origin https://github.com/<you>/nanoclaw.git
+   git remote add origin https://github.com/<you>/nanoclaw-oi.git
    git push --force origin main
    ```
    The `--force` is needed because the fresh fork's main is at upstream's latest, but the user wants their (possibly behind) version. The fork was just created so there's nothing to lose.
-3. From this point, `origin` = their fork, `upstream` = qwibitai/nanoclaw
+3. From this point, `origin` = their fork, `upstream` = ambroseacoulter/nanoclaw-oi
 
 ### Existing users migrating from the old skills engine
 
@@ -303,7 +303,7 @@ git fetch upstream main
 git checkout -b my-fix upstream/main
 # Make changes
 git push origin my-fix
-# Create PR from my-fix to qwibitai/nanoclaw:main
+# Create PR from my-fix to ambroseacoulter/nanoclaw-oi:main
 ```
 
 Standard fork contribution workflow. Their custom changes stay on their main and don't leak into the PR.
@@ -312,7 +312,7 @@ Standard fork contribution workflow. Their custom changes stay on their main and
 
 ### Contributor flow
 
-1. Fork `qwibitai/nanoclaw`
+1. Fork `ambroseacoulter/nanoclaw-oi`
 2. Branch from `main`
 3. Make the code changes (new channel file, modified integration points, updated package.json, .env.example additions, etc.)
 4. Open a PR to `main`
@@ -419,7 +419,7 @@ A flavor is a curated fork of NanoClaw — a combination of skills, custom chang
 
 ### Creating a flavor
 
-1. Fork `qwibitai/nanoclaw`
+1. Fork `ambroseacoulter/nanoclaw-oi`
 2. Merge in the skills you want
 3. Make custom changes (trigger word, prompts, integrations, etc.)
 4. Your fork's `main` IS the flavor
@@ -447,7 +447,7 @@ Then setup continues normally (dependencies, auth, container, service).
 
 After installation, the user's fork has three remotes:
 - `origin` — their fork (push customizations here)
-- `upstream` — `qwibitai/nanoclaw` (core updates)
+- `upstream` — `ambroseacoulter/nanoclaw-oi` (core updates)
 - `<flavor-name>` — the flavor fork (flavor updates)
 
 ### Updating a flavor
@@ -530,9 +530,9 @@ claude
 
 After:
 ```
-1. Fork qwibitai/nanoclaw on GitHub
-2. git clone https://github.com/<you>/nanoclaw.git
-3. cd nanoclaw
+1. Fork ambroseacoulter/nanoclaw-oi on GitHub
+2. git clone https://github.com/<you>/nanoclaw-oi.git
+3. cd nanoclaw-oi
 4. claude
 5. /setup
 ```
@@ -541,8 +541,8 @@ After:
 
 Updates to the setup flow:
 
-- Check if `upstream` remote exists; if not, add it: `git remote add upstream https://github.com/qwibitai/nanoclaw.git`
-- Check if `origin` points to the user's fork (not qwibitai). If it points to qwibitai, guide them through the fork migration.
+- Check if `upstream` remote exists; if not, add it: `git remote add upstream https://github.com/ambroseacoulter/nanoclaw-oi.git`
+- Check if `origin` points to the user's fork (not ambroseacoulter). If it points to ambroseacoulter, guide them through the fork migration.
 - **Install marketplace plugin:** `claude plugin install nanoclaw-skills@nanoclaw-skills --scope project` — makes all feature skills available (hot-loaded, no restart)
 - **Ask which channels to add:** present channel options (Discord, Telegram, Slack, WhatsApp, Gmail), run corresponding `/add-*` skills for selected channels
 - **Offer dependent skills:** after a channel is set up, offer relevant add-ons (e.g., Agent Swarm after Telegram, voice transcription after WhatsApp)
@@ -635,11 +635,11 @@ Users only need to re-merge a skill branch if the skill itself was updated (not 
 > **We now recommend forking instead of cloning.** This gives you a remote to push your customizations to.
 >
 > **If you currently have a clone with local changes**, migrate to a fork:
-> 1. Fork `qwibitai/nanoclaw` on GitHub
+> 1. Fork `ambroseacoulter/nanoclaw-oi` on GitHub
 > 2. Run:
 >    ```
 >    git remote rename origin upstream
->    git remote add origin https://github.com/<you>/nanoclaw.git
+>    git remote add origin https://github.com/<you>/nanoclaw-oi.git
 >    git push --force origin main
 >    ```
 >    This works even if you're way behind — just push your current state.
@@ -653,7 +653,7 @@ Users only need to re-merge a skill branch if the skill itself was updated (not 
 > **Contributing skills**
 >
 > To contribute a skill:
-> 1. Fork `qwibitai/nanoclaw`
+> 1. Fork `ambroseacoulter/nanoclaw-oi`
 > 2. Branch from `main` and make your code changes
 > 3. Open a regular PR
 >

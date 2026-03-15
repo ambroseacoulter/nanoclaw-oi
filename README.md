@@ -43,17 +43,17 @@ NanoClaw provides that same core functionality, but in a codebase small enough t
 ## Quick Start
 
 ```bash
-gh repo fork qwibitai/nanoclaw --clone
-cd nanoclaw
+gh repo fork ambroseacoulter/nanoclaw-oi --clone
+cd nanoclaw-oi
 claude
 ```
 
 <details>
 <summary>Without GitHub CLI</summary>
 
-1. Fork [qwibitai/nanoclaw](https://github.com/qwibitai/nanoclaw) on GitHub (click the Fork button)
-2. `git clone https://github.com/<your-username>/nanoclaw.git`
-3. `cd nanoclaw`
+1. Fork [ambroseacoulter/nanoclaw-oi](https://github.com/ambroseacoulter/nanoclaw-oi) on GitHub (click the Fork button)
+2. `git clone https://github.com/<your-username>/nanoclaw-oi.git`
+3. `cd nanoclaw-oi`
 4. `claude`
 
 </details>

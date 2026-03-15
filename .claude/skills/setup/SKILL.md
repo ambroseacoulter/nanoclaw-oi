@@ -27,37 +27,37 @@ Check the git remote configuration to ensure the user has a fork and upstream is
 Run:
 - `git remote -v`
 
-**Case A — `origin` points to `qwibitai/nanoclaw` (user cloned directly):**
+**Case A — `origin` points to `ambroseacoulter/nanoclaw-oi` (user cloned directly):**
 
 The user cloned instead of forking. AskUserQuestion: "You cloned NanoClaw directly. We recommend forking so you can push your customizations. Would you like to set up a fork?"
 - Fork now (recommended) — walk them through it
 - Continue without fork — they'll only have local changes
 
-If fork: instruct the user to fork `qwibitai/nanoclaw` on GitHub (they need to do this in their browser), then ask them for their GitHub username. Run:
+If fork: instruct the user to fork `ambroseacoulter/nanoclaw-oi` on GitHub (they need to do this in their browser), then ask them for their GitHub username. Run:
 ```bash
 git remote rename origin upstream
-git remote add origin https://github.com/<their-username>/nanoclaw.git
+git remote add origin https://github.com/<their-username>/nanoclaw-oi.git
 git push --force origin main
 ```
 Verify with `git remote -v`.
 
 If continue without fork: add upstream so they can still pull updates:
 ```bash
-git remote add upstream https://github.com/qwibitai/nanoclaw.git
+git remote add upstream https://github.com/ambroseacoulter/nanoclaw-oi.git
 ```
 
 **Case B — `origin` points to user's fork, no `upstream` remote:**
 
 Add upstream:
 ```bash
-git remote add upstream https://github.com/qwibitai/nanoclaw.git
+git remote add upstream https://github.com/ambroseacoulter/nanoclaw-oi.git
 ```
 
-**Case C — both `origin` (user's fork) and `upstream` (qwibitai) exist:**
+**Case C — both `origin` (user's fork) and `upstream` (ambroseacoulter) exist:**
 
 Already configured. Continue.
 
-**Verify:** `git remote -v` should show `origin` → user's repo, `upstream` → `qwibitai/nanoclaw.git`.
+**Verify:** `git remote -v` should show `origin` → user's repo, `upstream` → `ambroseacoulter/nanoclaw-oi.git`.
 
 ## 1. Bootstrap (Node.js + Dependencies)
 
