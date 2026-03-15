@@ -23,7 +23,10 @@ export interface ProxyConfig {
   authMode: AuthMode;
 }
 
-function buildUpstreamPath(upstreamUrl: URL, requestUrl: string | undefined): string {
+function buildUpstreamPath(
+  upstreamUrl: URL,
+  requestUrl: string | undefined,
+): string {
   const basePath = upstreamUrl.pathname.replace(/\/$/, '');
   const incomingPath = requestUrl || '/';
   if (!basePath) return incomingPath;

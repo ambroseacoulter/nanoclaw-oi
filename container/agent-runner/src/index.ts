@@ -57,6 +57,11 @@ interface SDKUserMessage {
   session_id: string;
 }
 
+interface SDKContentBlock {
+  type?: string;
+  text?: string;
+}
+
 const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
@@ -366,6 +371,7 @@ async function runQuery(
 
   let newSessionId: string | undefined;
   let lastAssistantUuid: string | undefined;
+  let lastAssistantText: string | null = null;
   let messageCount = 0;
   let resultCount = 0;
 
@@ -424,6 +430,23 @@ async function runQuery(
       lastAssistantUuid = (message as { uuid: string }).uuid;
     }
 
+    if (message.type === 'assistant' && 'message' in message) {
+      const assistantMessage = message as {
+        message?: { content?: Array<string | SDKContentBlock> };
+      };
+      const blocks = assistantMessage.message?.content || [];
+      const text = blocks
+        .map((block) => {
+          if (typeof block === 'string') return block;
+          if (block?.type === 'text' && block.text) return block.text;
+          return '';
+        })
+        .join('');
+      if (text.trim()) {
+        lastAssistantText = text;
+      }
+    }
+
     if (message.type === 'system' && message.subtype === 'init') {
       newSessionId = message.session_id;
       log(`Session initialized: ${newSessionId}`);
@@ -436,7 +459,9 @@ async function runQuery(
 
     if (message.type === 'result') {
       resultCount++;
-      const textResult = 'result' in message ? (message as { result?: string }).result : null;
+      const textResult =
+        ('result' in message ? (message as { result?: string }).result : null) ||
+        lastAssistantText;
       log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
       writeOutput({
         status: 'success',
